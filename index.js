@@ -62,26 +62,53 @@ async function run() {
     const paymentCollection = db.collection("payments");
     const ridersCollection = db.collection("riders");
 
-
     //middleWare with database access
-    const verifyAdmin = async(req,res,next)=>{
+    const verifyAdmin = async (req, res, next) => {
       const email = req.decoded_email;
-      const query ={email};
+      const query = { email };
       const user = await userCollection.findOne(query);
-      if(!user || user.role!=='admin'){
-        return res.status(403).send({message: "Forbidden Access"})
+      if (!user || user.role !== "admin") {
+        return res.status(403).send({ message: "Forbidden Access" });
       }
       next();
-    }
+    };
 
     // user api
     app.get("/users", verifyFBToken, async (req, res) => {
-      const cursor = userCollection.find();
-      const result = await cursor.toArray();
-      res.send(result);
-    });
+      try {
+        const { page = 1, limit = 10, search = "" } = req.query;
 
-  
+        // Convert page and limit to numbers
+        const pageNumber = parseInt(page);
+        const limitNumber = parseInt(limit);
+
+        // Create search filter
+        const searchFilter = search
+          ? { displayName: { $regex: search, $options: "i" } } // case-insensitive search by displayName
+          : {};
+
+        // Count total matching documents
+        const totalUsers = await userCollection.countDocuments(searchFilter);
+
+        // Fetch users with pagination
+        const users = await userCollection
+          .find(searchFilter)
+          .skip((pageNumber - 1) * limitNumber)
+          .limit(limitNumber)
+          .toArray();
+
+        res.send({
+          page: pageNumber,
+          limit: limitNumber,
+          totalUsers,
+          totalPages: Math.ceil(totalUsers / limitNumber),
+          users,
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Failed to fetch users" });
+      }
+    });
 
     app.get("/users/:email/role", async (req, res) => {
       const email = req.params.email;
@@ -90,18 +117,23 @@ async function run() {
       res.send({ role: user?.role || "user" });
     });
 
-    app.patch("/users/:id/role",verifyFBToken , verifyAdmin, async (req, res) => {
-      const id = req.params.id;
-      const roleInfo = req.body;
-      const query = { _id: new ObjectId(id) };
-      const updatedDoc = {
-        $set: {
-          role: roleInfo.role,
-        },
-      };
-      const result = await userCollection.updateOne(query, updatedDoc);
-      res.send(result);
-    });
+    app.patch(
+      "/users/:id/role",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        const roleInfo = req.body;
+        const query = { _id: new ObjectId(id) };
+        const updatedDoc = {
+          $set: {
+            role: roleInfo.role,
+          },
+        };
+        const result = await userCollection.updateOne(query, updatedDoc);
+        res.send(result);
+      }
+    );
 
     app.post("/users", async (req, res) => {
       const user = req.body;
@@ -117,6 +149,13 @@ async function run() {
       res.send(result);
     });
 
+    app.delete("/users/:id", verifyFBToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await userCollection.deleteOne(query);
+      res.send(result);
+    });
+
     // rider api
     app.post("/riders", async (req, res) => {
       const rider = req.body;
@@ -128,13 +167,43 @@ async function run() {
     });
 
     app.get("/riders", async (req, res) => {
-      const query = {};
-      if (req.query.status) {
-        query.status = req.query.status;
+      try {
+        const query = {};
+
+        // Optional status filter
+        if (req.query.status) {
+          query.status = req.query.status;
+        }
+
+        // Pagination
+        const page = parseInt(req.query.page) || 1; // default page 1
+        const limit = parseInt(req.query.limit) || 10; // default 10 per page
+        const skip = (page - 1) * limit;
+
+        // Sorting by createdAt, default descending (newest first)
+        const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
+
+        // Query with sort and pagination
+        const cursor = ridersCollection
+          .find(query)
+          .sort({ createdAt: sortOrder })
+          .skip(skip)
+          .limit(limit);
+
+        const result = await cursor.toArray();
+        const total = await ridersCollection.countDocuments(query); // total items
+
+        res.send({
+          data: result,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit),
+          totalItems: total,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ error: "Failed to fetch riders" });
       }
-      const cursor = ridersCollection.find(query);
-      const result = await cursor.toArray();
-      res.send(result);
     });
 
     app.get("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
@@ -153,7 +222,7 @@ async function run() {
       }
     });
 
-    app.patch("/riders/:id", verifyFBToken,verifyAdmin, async (req, res) => {
+    app.patch("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
       const status = req.body.status;
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
@@ -193,7 +262,7 @@ async function run() {
       res.send(result);
     });
 
-    app.delete("/riders/:id", verifyFBToken,verifyAdmin, async (req, res) => {
+    app.delete("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await ridersCollection.deleteOne(query);
@@ -202,19 +271,38 @@ async function run() {
 
     // parcel api
     app.get("/parcels", verifyFBToken, async (req, res) => {
-      const query = {};
       const { email } = req.query;
+      const page = parseInt(req.query.page) || 1; // default page 1
+      const limit = 10; // fixed limit
+      const skip = (page - 1) * limit;
+
+      const query = {};
+
       if (email) {
         query.senderEmail = email;
         if (email !== req.decoded_email) {
           return res.status(403).send({ message: "forbidden access" });
         }
       }
-      const options = { sort: { createdAt: -1 } };
-      const cursor = parcelsCollection.find(query, options);
+
+      const cursor = parcelsCollection
+        .find(query)
+        .sort({ createdAt: -1 }) 
+        .skip(skip)
+        .limit(limit);
+
       const result = await cursor.toArray();
-      res.send(result);
+      const total = await parcelsCollection.countDocuments(query);
+
+      res.send({
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        data: result,
+      });
     });
+
     app.get("/parcels/:id", async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
@@ -332,9 +420,13 @@ async function run() {
       res.send({ success: false });
     });
 
-    // payment API
     app.get("/payments", verifyFBToken, async (req, res) => {
       const email = req.query.email;
+
+      const page = parseInt(req.query.page) || 1; // default page = 1
+      const limit = 10; // fixed limit
+      const skip = (page - 1) * limit;
+
       const query = {};
 
       if (email) {
@@ -344,9 +436,25 @@ async function run() {
           return res.status(403).send({ message: "forbidden access" });
         }
       }
-      const cursor = paymentCollection.find(query).sort({ paidAt: -1 });
+
+      const cursor = paymentCollection
+        .find(query)
+        .sort({ paidAt: -1 }) // descending
+        .skip(skip)
+        .limit(limit);
+
       const result = await cursor.toArray();
-      res.send(result);
+
+      // Optional: total count (useful for frontend pagination)
+      const total = await paymentCollection.countDocuments(query);
+
+      res.send({
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        data: result,
+      });
     });
 
     await client.db("admin").command({ ping: 1 });
