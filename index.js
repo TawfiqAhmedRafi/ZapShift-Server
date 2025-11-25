@@ -36,7 +36,7 @@ const verifyFBToken = async (req, res, next) => {
   try {
     const idToken = token.split(" ")[1];
     const decoded = await admin.auth().verifyIdToken(idToken);
-   
+
     req.decoded_email = decoded.email;
     next();
   } catch (err) {
@@ -57,75 +57,123 @@ async function run() {
   try {
     await client.connect();
     const db = client.db("zap_shift_db");
-    const userCollection = db.collection('users')
+    const userCollection = db.collection("users");
     const parcelsCollection = db.collection("parcels");
     const paymentCollection = db.collection("payments");
-    const ridersCollection = db.collection("riders")
+    const ridersCollection = db.collection("riders");
 
     // user api
-    app.post('/users',async (req , res)=>{
-      const user = req.body;
-      user.role='user';
-      user.createdAt = new Date();
-      const email= user.email
-       const userExist = await userCollection.findOne({email})
-       if(userExist){
-        return res.send({message:'user exists'})
-       }
-
-      const result = await userCollection.insertOne(user);
-      res.send(result)
-    })
-
-
-
-    // rider api
-    app.post('/riders', async (req,res)=>{
-      const rider = req.body
-      rider.status = 'pending';
-      rider.createdAt = new Date();
-
-      const result = await ridersCollection.insertOne(rider);
-      res.send(result)
-
-    })
-
-    app.get('/riders', async(req,res)=>{
-      
-      const query = {}
-      if(req.query.status){
-        query.status= req.query.status
-      }
-      const cursor = ridersCollection.find(query)
+    app.get("/users", verifyFBToken , async (req,res)=>{
+      const cursor = userCollection.find();
       const result = await cursor.toArray();
       res.send(result)
     })
 
-    app.patch('/riders/:id',verifyFBToken , async (req,res)=>{
-      const status = req.body.status;
+    app.patch("/users/:id", async(req,res)=>{
       const id = req.params.id;
-      const query={_id: new ObjectId(id)}
-      const updatedDoc = {
+      const roleInfo = req.body;
+      const query ={ _id: new ObjectId(id)};
+      const updatedDoc ={
         $set:{
-          status : status
+          role : roleInfo.role
         }
       }
-
-      const result = await ridersCollection.updateOne(query,updatedDoc)
-      if(status==='approved'){
-        const email = req.body.email;
-        const userQuery = {email}
-        const updateUser ={
-          $set:{
-            role : 'rider'
-          }
-        }
-        const userResult = await userCollection.updateOne(userQuery,updateUser);
-      }
+      const result = await userCollection.updateOne(query,updatedDoc);
       res.send(result)
     })
 
-    app.delete("/riders/:id",verifyFBToken, async (req, res) => {
+
+    app.post("/users", async (req, res) => {
+      const user = req.body;
+      user.role = "user";
+      user.createdAt = new Date();
+      const email = user.email;
+      const userExist = await userCollection.findOne({ email });
+      if (userExist) {
+        return res.send({ message: "user exists" });
+      }
+
+      const result = await userCollection.insertOne(user);
+      res.send(result);
+    });
+
+    // rider api
+    app.post("/riders", async (req, res) => {
+      const rider = req.body;
+      rider.status = "pending";
+      rider.createdAt = new Date();
+
+      const result = await ridersCollection.insertOne(rider);
+      res.send(result);
+    });
+
+    app.get("/riders", async (req, res) => {
+      const query = {};
+      if (req.query.status) {
+        query.status = req.query.status;
+      }
+      const cursor = ridersCollection.find(query);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
+
+    app.get("/riders/:id", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        const rider = await ridersCollection.findOne({ _id: new ObjectId(id) });
+
+        if (!rider) {
+          return res.status(404).send({ message: "Rider not found" });
+        }
+
+        res.send(rider);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching rider", error });
+      }
+    });
+
+    app.patch("/riders/:id", verifyFBToken, async (req, res) => {
+      const status = req.body.status;
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          status: status,
+        },
+      };
+
+      const result = await ridersCollection.updateOne(query, updatedDoc);
+      if (status === "approved") {
+        const email = req.body.email;
+        const userQuery = { email };
+        const updateUser = {
+          $set: {
+            role: "rider",
+          },
+        };
+        const userResult = await userCollection.updateOne(
+          userQuery,
+          updateUser
+        );
+      }
+      if (status === "rejected") {
+        const email = req.body.email;
+        const userQuery = { email };
+        const updateUser = {
+          $set: {
+            role: "user",
+          },
+        };
+        const userResult = await userCollection.updateOne(
+          userQuery,
+          updateUser
+        );
+      }
+      res.send(result);
+    });
+
+    app.delete("/riders/:id", verifyFBToken, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await ridersCollection.deleteOne(query);
@@ -197,7 +245,7 @@ async function run() {
     });
 
     //
-    app.patch("/payment-success",verifyFBToken,  async (req, res) => {
+    app.patch("/payment-success", verifyFBToken, async (req, res) => {
       const sessionId = req.query.session_id;
       const session = await stripe.checkout.sessions.retrieve(sessionId);
       if (session.customer_email !== req.decoded_email) {
