@@ -168,22 +168,21 @@ async function run() {
 
     app.get("/riders", async (req, res) => {
       try {
+        const { status, district, workStatus } = req.query;
         const query = {};
 
-        // Optional status filter
-        if (req.query.status) {
-          query.status = req.query.status;
+        if (status) {
+          query.status = status;
         }
+        if (district) query.district = district;
+        if (workStatus) query.workStatus = workStatus;
 
-        // Pagination
-        const page = parseInt(req.query.page) || 1; // default page 1
-        const limit = parseInt(req.query.limit) || 10; // default 10 per page
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
         const skip = (page - 1) * limit;
 
-        // Sorting by createdAt, default descending (newest first)
         const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
 
-        // Query with sort and pagination
         const cursor = ridersCollection
           .find(query)
           .sort({ createdAt: sortOrder })
@@ -225,40 +224,38 @@ async function run() {
     app.patch("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
       const status = req.body.status;
       const id = req.params.id;
+      const email = req.body.email;
+
       const query = { _id: new ObjectId(id) };
       const updatedDoc = {
         $set: {
           status: status,
+          workStatus: "available",
         },
       };
 
+      // Update the rider's status first
       const result = await ridersCollection.updateOne(query, updatedDoc);
-      if (status === "approved") {
-        const email = req.body.email;
-        const userQuery = { email };
-        const updateUser = {
-          $set: {
-            role: "rider",
-          },
-        };
-        const userResult = await userCollection.updateOne(
-          userQuery,
-          updateUser
-        );
+
+      // Fetch the user to check role
+      const user = await userCollection.findOne({ email });
+
+      if (!user) {
+        return res.status(404).send({ message: "User not found" });
       }
-      if (status === "rejected") {
-        const email = req.body.email;
-        const userQuery = { email };
-        const updateUser = {
-          $set: {
-            role: "user",
-          },
-        };
-        const userResult = await userCollection.updateOne(
-          userQuery,
-          updateUser
-        );
+
+      // Update role only if user is not admin
+      if (user.role !== "admin") {
+        if (status === "approved") {
+          await userCollection.updateOne(
+            { email },
+            { $set: { role: "rider" } }
+          );
+        } else if (status === "rejected") {
+          await userCollection.updateOne({ email }, { $set: { role: "user" } });
+        }
       }
+
       res.send(result);
     });
 
@@ -271,7 +268,7 @@ async function run() {
 
     // parcel api
     app.get("/parcels", verifyFBToken, async (req, res) => {
-      const { email } = req.query;
+      const { email, deliveryStatus } = req.query;
       const page = parseInt(req.query.page) || 1; // default page 1
       const limit = 10; // fixed limit
       const skip = (page - 1) * limit;
@@ -285,9 +282,13 @@ async function run() {
         }
       }
 
+      if (deliveryStatus) {
+        query.deliveryStatus = deliveryStatus;
+      }
+
       const cursor = parcelsCollection
         .find(query)
-        .sort({ createdAt: -1 }) 
+        .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit);
 
@@ -314,6 +315,35 @@ async function run() {
       parcel.createdAt = new Date();
       const result = await parcelsCollection.insertOne(parcel);
       res.send(result);
+    });
+
+    app.patch("/parcels/:id", async (req, res) => {
+      const { riderId, riderName, riderEmail, riderPhone } = req.body;
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          deliveryStatus: "driver-assigned",
+          riderId: riderId,
+          riderName: riderName,
+          riderPhone: riderPhone,
+          riderEmail: riderEmail,
+        },
+      };
+
+      const result = await parcelsCollection.updateOne(query, updatedDoc);
+      // update rider
+      const riderQuery = { _id: new ObjectId(riderId) };
+      const riderUpdatedDoc = {
+        $set: {
+          workStatus: "in_delivery",
+        },
+      };
+      const riderResult = await ridersCollection.updateOne(
+        riderQuery,
+        riderUpdatedDoc
+      );
+      res.send(riderResult);
     });
 
     app.delete("/parcels/:id", async (req, res) => {
@@ -356,13 +386,15 @@ async function run() {
     app.patch("/payment-success", verifyFBToken, async (req, res) => {
       const sessionId = req.query.session_id;
       const session = await stripe.checkout.sessions.retrieve(sessionId);
+
       if (session.customer_email !== req.decoded_email) {
         return res.status(403).send({ message: "forbidden access" });
       }
 
       const transactionId = session.payment_intent;
-      const paymentExist = await paymentCollection.findOne({ transactionId });
 
+      // Check if payment already exists
+      const paymentExist = await paymentCollection.findOne({ transactionId });
       if (paymentExist) {
         return res.send({
           message: "already exists",
@@ -374,7 +406,7 @@ async function run() {
       if (session.payment_status === "paid") {
         const parcelId = session.metadata.parcelId;
 
-        // Get parcel info from parcels collection
+        // Get parcel info
         const parcel = await parcelsCollection.findOne({
           _id: new ObjectId(parcelId),
         });
@@ -382,14 +414,22 @@ async function run() {
           return res.status(404).send({ error: "Parcel not found" });
         }
 
-        // Update parcel with payment status and tracking ID
+        // Generate trackingId only once
         const trackingId = generateTrackingId();
+
+        // Update parcel
         await parcelsCollection.updateOne(
           { _id: new ObjectId(parcelId) },
-          { $set: { paymentStatus: "paid", trackingId } }
+          {
+            $set: {
+              paymentStatus: "paid",
+              deliveryStatus: "pending-pickup",
+              trackingId,
+            },
+          }
         );
 
-        // Create payment object using parcel receiver info
+        // Prepare payment object
         const payment = {
           amount: session.amount_total / 100,
           currency: session.currency,
@@ -407,7 +447,12 @@ async function run() {
           receiverPhone: parcel.receiverPhoneNumber,
         };
 
-        const resultPayment = await paymentCollection.insertOne(payment);
+        // Upsert payment to avoid duplicates
+        const resultPayment = await paymentCollection.updateOne(
+          { transactionId }, // filter
+          { $setOnInsert: payment }, // only insert if not exists
+          { upsert: true } // ensures single document
+        );
 
         return res.send({
           success: true,
