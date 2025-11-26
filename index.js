@@ -221,30 +221,27 @@ async function run() {
       }
     });
 
-    app.patch("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
-      const status = req.body.status;
-      const id = req.params.id;
-      const email = req.body.email;
+ app.patch("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
+  const status = req.body.status;
+  const id = req.params.id;
+  const email = req.body.email;
 
-      const query = { _id: new ObjectId(id) };
-      const updatedDoc = {
-        $set: {
-          status: status,
-          workStatus: "available",
-        },
-      };
+  const query = { _id: new ObjectId(id) };
 
-      // Update the rider's status first
-      const result = await ridersCollection.updateOne(query, updatedDoc);
+  const updatedDoc = {
+    $set: {
+      status: status,
+      workStatus: status === "rejected" ? "" : "available",
+    },
+  };
 
-      // Fetch the user to check role
-      const user = await userCollection.findOne({ email });
+  try {
+ 
+    const result = await ridersCollection.updateOne(query, updatedDoc);
 
-      if (!user) {
-        return res.status(404).send({ message: "User not found" });
-      }
+    const user = await userCollection.findOne({ email });
 
-      // Update role only if user is not admin
+    if (user) {
       if (user.role !== "admin") {
         if (status === "approved") {
           await userCollection.updateOne(
@@ -252,12 +249,24 @@ async function run() {
             { $set: { role: "rider" } }
           );
         } else if (status === "rejected") {
-          await userCollection.updateOne({ email }, { $set: { role: "user" } });
+          await userCollection.updateOne(
+            { email },
+            { $set: { role: "user" } }
+          );
         }
       }
-
-      res.send(result);
+    }
+  
+    res.send(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({
+      message: "Something went wrong while updating rider",
+      error: err.message,
     });
+  }
+});
+
 
     app.delete("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
