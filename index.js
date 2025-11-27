@@ -221,52 +221,50 @@ async function run() {
       }
     });
 
- app.patch("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
-  const status = req.body.status;
-  const id = req.params.id;
-  const email = req.body.email;
+    app.patch("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
+      const status = req.body.status;
+      const id = req.params.id;
+      const email = req.body.email;
 
-  const query = { _id: new ObjectId(id) };
+      const query = { _id: new ObjectId(id) };
 
-  const updatedDoc = {
-    $set: {
-      status: status,
-      workStatus: status === "rejected" ? "" : "available",
-    },
-  };
+      const updatedDoc = {
+        $set: {
+          status: status,
+          workStatus: status === "rejected" ? "" : "available",
+        },
+      };
 
-  try {
- 
-    const result = await ridersCollection.updateOne(query, updatedDoc);
+      try {
+        const result = await ridersCollection.updateOne(query, updatedDoc);
 
-    const user = await userCollection.findOne({ email });
+        const user = await userCollection.findOne({ email });
 
-    if (user) {
-      if (user.role !== "admin") {
-        if (status === "approved") {
-          await userCollection.updateOne(
-            { email },
-            { $set: { role: "rider" } }
-          );
-        } else if (status === "rejected") {
-          await userCollection.updateOne(
-            { email },
-            { $set: { role: "user" } }
-          );
+        if (user) {
+          if (user.role !== "admin") {
+            if (status === "approved") {
+              await userCollection.updateOne(
+                { email },
+                { $set: { role: "rider" } }
+              );
+            } else if (status === "rejected") {
+              await userCollection.updateOne(
+                { email },
+                { $set: { role: "user" } }
+              );
+            }
+          }
         }
-      }
-    }
-  
-    res.send(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({
-      message: "Something went wrong while updating rider",
-      error: err.message,
-    });
-  }
-});
 
+        res.send(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({
+          message: "Something went wrong while updating rider",
+          error: err.message,
+        });
+      }
+    });
 
     app.delete("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
@@ -313,12 +311,29 @@ async function run() {
       });
     });
 
+    app.get("/parcels/rider",async (req,res)=>{
+      const {riderEmail , deliveryStatus} = req.query;
+      const query={};
+      if(riderEmail){
+        query.riderEmail = riderEmail
+      }
+      if(deliveryStatus){
+        query.deliveryStatus = deliveryStatus;
+      }
+      const cursor = parcelsCollection.find(query)
+      const result = await cursor.toArray();
+      res.send(result)
+    })
+
     app.get("/parcels/:id", async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await parcelsCollection.findOne(query);
       res.send(result);
     });
+
+    
+
     app.post("/parcels", async (req, res) => {
       const parcel = req.body;
       parcel.createdAt = new Date();
