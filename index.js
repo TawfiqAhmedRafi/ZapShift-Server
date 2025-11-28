@@ -311,19 +311,20 @@ async function run() {
       });
     });
 
-    app.get("/parcels/rider",async (req,res)=>{
-      const {riderEmail , deliveryStatus} = req.query;
-      const query={};
-      if(riderEmail){
-        query.riderEmail = riderEmail
+    app.get("/parcels/rider", async (req, res) => {
+      const { riderEmail, deliveryStatus } = req.query;
+      const query = {};
+      if (riderEmail) {
+        query.riderEmail = riderEmail;
       }
-      if(deliveryStatus){
-        query.deliveryStatus = deliveryStatus;
+      if (deliveryStatus) {
+        // query.deliveryStatus = {$in: ['driver-assigned', 'rider-arriving']};
+        query.deliveryStatus = {$nin: ['parcel-delivered']};
       }
-      const cursor = parcelsCollection.find(query)
+      const cursor = parcelsCollection.find(query);
       const result = await cursor.toArray();
-      res.send(result)
-    })
+      res.send(result);
+    });
 
     app.get("/parcels/:id", async (req, res) => {
       const id = req.params.id;
@@ -332,7 +333,63 @@ async function run() {
       res.send(result);
     });
 
-    
+app.patch("/parcels/:id/status", async (req, res) => {
+  try {
+    const { deliveryStatus, workStatus } = req.body;
+    const parcelId = req.params.id;
+
+    //  Find the parcel
+    const parcel = await parcelsCollection.findOne({ _id: new ObjectId(parcelId) });
+    if (!parcel) return res.status(404).send({ message: "Parcel not found" });
+
+    let riderId = parcel.riderId;
+
+    //  Handle rejection
+    let clearRider = {};
+    if (deliveryStatus === "pending-pickup" && riderId) {
+      
+      await ridersCollection.updateOne(
+        { _id: new ObjectId(riderId) },
+        { $set: { workStatus: "available" } }
+      );
+
+      riderId = ""; // clear local variable
+      clearRider = {
+        riderId: "",
+        riderEmail: "",
+        riderName: "",
+        riderPhone: "",
+      };
+    }
+
+    //  Update rider workStatus for normal flow
+    if (deliveryStatus !== "pending-pickup" && riderId) {
+      await ridersCollection.updateOne(
+        { _id: new ObjectId(riderId) },
+        { $set: { workStatus } }
+      );
+    }
+
+    //  Update parcel
+    const updatedParcel = {
+      $set: {
+        deliveryStatus,
+        ...clearRider,
+      },
+    };
+
+    const result = await parcelsCollection.updateOne(
+      { _id: new ObjectId(parcelId) },
+      updatedParcel
+    );
+
+    res.send(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Internal server error" });
+  }
+});
+
 
     app.post("/parcels", async (req, res) => {
       const parcel = req.body;
