@@ -61,6 +61,7 @@ async function run() {
     const parcelsCollection = db.collection("parcels");
     const paymentCollection = db.collection("payments");
     const ridersCollection = db.collection("riders");
+    const trackingsCollection = db.collection("trackings");
 
     //middleWare with database access
     const verifyAdmin = async (req, res, next) => {
@@ -71,6 +72,23 @@ async function run() {
         return res.status(403).send({ message: "Forbidden Access" });
       }
       next();
+    };
+
+    const logTracking = async (trackingId, status) => {
+      const update = {
+        $setOnInsert: {
+          trackingId,
+          status,
+          details: status.split("-").join(" "),
+          createdAt: new Date(),
+        },
+      };
+      const options = { upsert: true };
+      return await trackingsCollection.updateOne(
+        { trackingId, status },
+        update,
+        options
+      );
     };
 
     // user api
@@ -157,7 +175,7 @@ async function run() {
     });
 
     // rider api
-    app.post("/riders", async (req, res) => {
+    app.post("/riders", verifyFBToken, async (req, res) => {
       const rider = req.body;
       rider.status = "pending";
       rider.createdAt = new Date();
@@ -310,19 +328,25 @@ async function run() {
         data: result,
       });
     });
-
     app.get("/parcels/rider", async (req, res) => {
       const { riderEmail, deliveryStatus } = req.query;
       const query = {};
+
       if (riderEmail) {
         query.riderEmail = riderEmail;
       }
-      if (deliveryStatus) {
-        // query.deliveryStatus = {$in: ['driver-assigned', 'rider-arriving']};
-        query.deliveryStatus = {$nin: ['parcel-delivered']};
+
+      if (deliveryStatus !== "parcel-delivered") {
+        query.deliveryStatus = { $nin: ["parcel-delivered"] };
+      } else {
+        query.deliveryStatus = deliveryStatus;
       }
-      const cursor = parcelsCollection.find(query);
-      const result = await cursor.toArray();
+
+      const result = await parcelsCollection
+        .find(query)
+        .sort({ _id: -1 })
+        .toArray();
+
       res.send(result);
     });
 
@@ -333,63 +357,64 @@ async function run() {
       res.send(result);
     });
 
-app.patch("/parcels/:id/status", async (req, res) => {
-  try {
-    const { deliveryStatus, workStatus } = req.body;
-    const parcelId = req.params.id;
+    app.patch("/parcels/:id/status", async (req, res) => {
+      try {
+        const { deliveryStatus, workStatus , trackingId } = req.body;
+        const parcelId = req.params.id;
 
-    //  Find the parcel
-    const parcel = await parcelsCollection.findOne({ _id: new ObjectId(parcelId) });
-    if (!parcel) return res.status(404).send({ message: "Parcel not found" });
+        //  Find the parcel
+        const parcel = await parcelsCollection.findOne({
+          _id: new ObjectId(parcelId),
+        });
+        if (!parcel)
+          return res.status(404).send({ message: "Parcel not found" });
 
-    let riderId = parcel.riderId;
+        let riderId = parcel.riderId;
 
-    //  Handle rejection
-    let clearRider = {};
-    if (deliveryStatus === "pending-pickup" && riderId) {
-      
-      await ridersCollection.updateOne(
-        { _id: new ObjectId(riderId) },
-        { $set: { workStatus: "available" } }
-      );
+        //  Handle rejection
+        let clearRider = {};
+        if (deliveryStatus === "pending-pickup" && riderId) {
+          await ridersCollection.updateOne(
+            { _id: new ObjectId(riderId) },
+            { $set: { workStatus: "available" } }
+          );
 
-      riderId = ""; // clear local variable
-      clearRider = {
-        riderId: "",
-        riderEmail: "",
-        riderName: "",
-        riderPhone: "",
-      };
-    }
+          riderId = ""; // clear local variable
+          clearRider = {
+            riderId: "",
+            riderEmail: "",
+            riderName: "",
+            riderPhone: "",
+          };
+        }
 
-    //  Update rider workStatus for normal flow
-    if (deliveryStatus !== "pending-pickup" && riderId) {
-      await ridersCollection.updateOne(
-        { _id: new ObjectId(riderId) },
-        { $set: { workStatus } }
-      );
-    }
+        //  Update rider workStatus for normal flow
+        if (deliveryStatus !== "pending-pickup" && riderId) {
+          await ridersCollection.updateOne(
+            { _id: new ObjectId(riderId) },
+            { $set: { workStatus } }
+          );
+        }
 
-    //  Update parcel
-    const updatedParcel = {
-      $set: {
-        deliveryStatus,
-        ...clearRider,
-      },
-    };
+        //  Update parcel
+        const updatedParcel = {
+          $set: {
+            deliveryStatus,
+            ...clearRider,
+          },
+        };
 
-    const result = await parcelsCollection.updateOne(
-      { _id: new ObjectId(parcelId) },
-      updatedParcel
-    );
-
-    res.send(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: "Internal server error" });
-  }
-});
-
+        const result = await parcelsCollection.updateOne(
+          { _id: new ObjectId(parcelId) },
+          updatedParcel
+        );
+        logTracking(trackingId , deliveryStatus)
+        res.send(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Internal server error" });
+      }
+    });
 
     app.post("/parcels", async (req, res) => {
       const parcel = req.body;
@@ -399,7 +424,7 @@ app.patch("/parcels/:id/status", async (req, res) => {
     });
 
     app.patch("/parcels/:id", async (req, res) => {
-      const { riderId, riderName, riderEmail, riderPhone } = req.body;
+      const { riderId, riderName, riderEmail, riderPhone , trackingId} = req.body;
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const updatedDoc = {
@@ -424,6 +449,8 @@ app.patch("/parcels/:id/status", async (req, res) => {
         riderQuery,
         riderUpdatedDoc
       );
+      // log tracking
+      logTracking(trackingId,"driver-assigned")
       res.send(riderResult);
     });
 
@@ -495,17 +522,18 @@ app.patch("/parcels/:id/status", async (req, res) => {
           return res.status(404).send({ error: "Parcel not found" });
         }
 
-        // Generate trackingId only once
-        const trackingId = generateTrackingId();
-
-        // Update parcel
+        // Use existing trackingId if already present, otherwise generate a new one
+        let trackingId = parcel.trackingId;
+        if (!trackingId) {
+          trackingId = generateTrackingId();
+        }
         await parcelsCollection.updateOne(
-          { _id: new ObjectId(parcelId) },
+          { _id: parcel._id },
           {
             $set: {
+              trackingId,
               paymentStatus: "paid",
               deliveryStatus: "pending-pickup",
-              trackingId,
             },
           }
         );
@@ -534,6 +562,15 @@ app.patch("/parcels/:id/status", async (req, res) => {
           { $setOnInsert: payment }, // only insert if not exists
           { upsert: true } // ensures single document
         );
+
+        // Log tracking only if it doesn't already exist
+        const existingLog = await trackingsCollection.findOne({
+          trackingId,
+          status: "pending-pickup",
+        });
+        if (!existingLog) {
+          await logTracking(trackingId, "pending-pickup");
+        }
 
         return res.send({
           success: true,
