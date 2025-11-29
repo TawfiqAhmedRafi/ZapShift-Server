@@ -91,6 +91,14 @@ async function run() {
       );
     };
 
+    // tracking api
+    app.get("/trackings/:trackingId/logs", async (req, res) => {
+      const trackingId = req.params.trackingId;
+      const query = { trackingId };
+      const result = await trackingsCollection.find(query).toArray();
+      res.send(result)
+    });
+
     // user api
     app.get("/users", verifyFBToken, async (req, res) => {
       try {
@@ -359,7 +367,7 @@ async function run() {
 
     app.patch("/parcels/:id/status", async (req, res) => {
       try {
-        const { deliveryStatus, workStatus , trackingId } = req.body;
+        const { deliveryStatus, workStatus, trackingId } = req.body;
         const parcelId = req.params.id;
 
         //  Find the parcel
@@ -373,7 +381,7 @@ async function run() {
 
         //  Handle rejection
         let clearRider = {};
-        if (deliveryStatus === "pending-pickup" && riderId) {
+        if (deliveryStatus === "parcel-paid" && riderId) {
           await ridersCollection.updateOne(
             { _id: new ObjectId(riderId) },
             { $set: { workStatus: "available" } }
@@ -389,7 +397,7 @@ async function run() {
         }
 
         //  Update rider workStatus for normal flow
-        if (deliveryStatus !== "pending-pickup" && riderId) {
+        if (deliveryStatus !== "parcel-paid" && riderId) {
           await ridersCollection.updateOne(
             { _id: new ObjectId(riderId) },
             { $set: { workStatus } }
@@ -408,7 +416,7 @@ async function run() {
           { _id: new ObjectId(parcelId) },
           updatedParcel
         );
-        logTracking(trackingId , deliveryStatus)
+        logTracking(trackingId, deliveryStatus);
         res.send(result);
       } catch (err) {
         console.error(err);
@@ -418,13 +426,17 @@ async function run() {
 
     app.post("/parcels", async (req, res) => {
       const parcel = req.body;
+      const trackingId = generateTrackingId();
       parcel.createdAt = new Date();
+      parcel.trackingId=trackingId
+      logTracking(trackingId,'parcel-created')
       const result = await parcelsCollection.insertOne(parcel);
       res.send(result);
     });
 
     app.patch("/parcels/:id", async (req, res) => {
-      const { riderId, riderName, riderEmail, riderPhone , trackingId} = req.body;
+      const { riderId, riderName, riderEmail, riderPhone, trackingId } =
+        req.body;
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const updatedDoc = {
@@ -450,7 +462,7 @@ async function run() {
         riderUpdatedDoc
       );
       // log tracking
-      logTracking(trackingId,"driver-assigned")
+      logTracking(trackingId, "driver-assigned");
       res.send(riderResult);
     });
 
@@ -482,6 +494,7 @@ async function run() {
         metadata: {
           parcelId: paymentInfo.parcelId,
           parcelName: paymentInfo.parcelName,
+          trackingId : paymentInfo.trackingId
         },
         customer_email: paymentInfo.senderEmail,
         success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
@@ -522,18 +535,15 @@ async function run() {
           return res.status(404).send({ error: "Parcel not found" });
         }
 
-        // Use existing trackingId if already present, otherwise generate a new one
-        let trackingId = parcel.trackingId;
-        if (!trackingId) {
-          trackingId = generateTrackingId();
-        }
+        // trackingId created created during parcel creation
+        const trackingId = session.metadata.trackingId//
         await parcelsCollection.updateOne(
           { _id: parcel._id },
           {
             $set: {
-              trackingId,
+              
               paymentStatus: "paid",
-              deliveryStatus: "pending-pickup",
+              deliveryStatus: "parcel-paid",
             },
           }
         );
@@ -566,10 +576,10 @@ async function run() {
         // Log tracking only if it doesn't already exist
         const existingLog = await trackingsCollection.findOne({
           trackingId,
-          status: "pending-pickup",
+          status: "parcel-paid",
         });
         if (!existingLog) {
-          await logTracking(trackingId, "pending-pickup");
+          await logTracking(trackingId, "parcel-paid");
         }
 
         return res.send({
