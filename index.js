@@ -73,6 +73,15 @@ async function run() {
       }
       next();
     };
+    const verifyRider = async (req, res, next) => {
+      const email = req.decoded_email;
+      const query = { email };
+      const user = await userCollection.findOne(query);
+      if (!user || user.role !== "rider") {
+        return res.status(403).send({ message: "Forbidden Access" });
+      }
+      next();
+    };
 
     const logTracking = async (trackingId, status) => {
       const update = {
@@ -336,7 +345,7 @@ async function run() {
         data: result,
       });
     });
-    app.get("/parcels/rider", async (req, res) => {
+    app.get("/parcels/rider",verifyFBToken, verifyRider, async (req, res) => {
       const { riderEmail, deliveryStatus } = req.query;
       const query = {};
 
@@ -365,7 +374,7 @@ async function run() {
       res.send(result);
     });
 
-    app.patch("/parcels/:id/status", async (req, res) => {
+    app.patch("/parcels/:id/status",verifyFBToken, verifyRider, async (req, res) => {
       try {
         const { deliveryStatus, workStatus, trackingId } = req.body;
         const parcelId = req.params.id;
