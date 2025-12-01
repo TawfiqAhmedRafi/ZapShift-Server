@@ -374,6 +374,23 @@ async function run() {
       res.send(result);
     });
 
+    app.get('/parcels/delivery-Status/stats', async (req,res)=>{
+      const pipeline =[
+        { $group : {
+          _id : '$deliveryStatus',
+          count : { $sum : 1}
+        }},
+        {
+          $project :{
+            status : '$_id',
+            count : 1
+          }
+        }
+      ]
+      const result = await parcelsCollection.aggregate(pipeline).toArray();
+      res.send(result)
+    })
+
     app.patch("/parcels/:id/status",verifyFBToken, verifyRider, async (req, res) => {
       try {
         const { deliveryStatus, workStatus, trackingId } = req.body;
