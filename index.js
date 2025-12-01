@@ -6,6 +6,7 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET);
 const crypto = require("crypto");
 const admin = require("firebase-admin");
 
+
 const serviceAccount = require("./zapshift-firebase-adminsdk.json");
 
 admin.initializeApp({
@@ -374,22 +375,6 @@ async function run() {
       res.send(result);
     });
 
-    app.get('/parcels/delivery-Status/stats', async (req,res)=>{
-      const pipeline =[
-        { $group : {
-          _id : '$deliveryStatus',
-          count : { $sum : 1}
-        }},
-        {
-          $project :{
-            status : '$_id',
-            count : 1
-          }
-        }
-      ]
-      const result = await parcelsCollection.aggregate(pipeline).toArray();
-      res.send(result)
-    })
 
     app.patch("/parcels/:id/status",verifyFBToken, verifyRider, async (req, res) => {
       try {
@@ -655,6 +640,141 @@ async function run() {
         data: result,
       });
     });
+
+    // dashboard API
+
+
+app.get("/dashboard/stats", verifyFBToken, verifyAdmin, async (req, res) => {
+  try {
+    const totalParcels = await parcelsCollection.countDocuments();
+    const deliveredParcels = await parcelsCollection.countDocuments({ deliveryStatus: "parcel-delivered" });
+    const pendingParcels = await parcelsCollection.countDocuments({ deliveryStatus: { $nin: ["parcel-delivered"] } });
+
+    const totalRevenueAgg = await paymentCollection.aggregate([
+      { $match: { amount: { $exists: true, $type: "number" } } },
+      { $group: { _id: null, total: { $sum: "$amount" } } }
+    ]).toArray();
+    const totalRevenue = totalRevenueAgg[0]?.total || 0;
+
+    const totalUsers = await userCollection.countDocuments();
+    const totalRiders = await ridersCollection.countDocuments();
+
+    res.send({
+      totalParcels,
+      deliveredParcels,
+      pendingParcels,
+      totalRevenue,
+      totalUsers,
+      totalRiders
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to fetch dashboard stats" });
+  }
+});
+
+app.get("/dashboard/delivery-status", verifyFBToken, verifyAdmin, async (req, res) => {
+  try {
+    const pipeline = [
+      { $match: { deliveryStatus: { $exists: true, $ne: null } } },
+      { $group: { _id: "$deliveryStatus", count: { $sum: 1 } } },
+      { $project: { status: "$_id", count: 1, _id: 0 } }
+    ];
+    const result = await parcelsCollection.aggregate(pipeline).toArray();
+    res.send(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to fetch delivery status data" });
+  }
+});
+
+app.get("/dashboard/revenue", verifyFBToken, verifyAdmin, async (req, res) => {
+  try {
+    const { period = "monthly" } = req.query; // default monthly
+
+    let groupId;
+    if (period === "weekly") {
+      
+      groupId = {
+        $dateToString: { format: "%Y-%U", date: "$paidAt" } // 
+      };
+    } else {
+      
+      groupId = {
+        $dateToString: { format: "%Y-%m", date: "$paidAt" }
+      };
+    }
+
+    const pipeline = [
+      { $match: { paidAt: { $exists: true, $type: "date" } } },
+      {
+        $group: {
+          _id: groupId,
+          totalRevenue: { $sum: "$amount" }
+        }
+      },
+      { $sort: { "_id": 1 } },
+      { $project: { period: "$_id", totalRevenue: 1, _id: 0 } }
+    ];
+
+    const result = await paymentCollection.aggregate(pipeline).toArray();
+    res.send(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to fetch revenue" });
+  }
+});
+
+
+app.get("/dashboard/rider-performance", verifyFBToken, verifyAdmin, async (req, res) => {
+  try {
+    const pipeline = [
+      { $match: { riderId: { $exists: true, $ne: "" } } },
+      {
+        $group: {
+          _id: "$riderId",
+          deliveries: { $sum: 1 }
+        }
+      },
+      {
+        $lookup: {
+          from: "riders",
+          let: { riderIdStr: "$_id" },
+          pipeline: [
+            {
+              $match: {
+                $expr: { $eq: ["$_id", { $toObjectId: "$$riderIdStr" }] }
+              }
+            }
+          ],
+          as: "riderInfo"
+        }
+      },
+      { $unwind: "$riderInfo" },
+      {
+        $project: {
+          _id: 0,
+          riderId: "$_id",
+          riderName: "$riderInfo.name",
+          region: "$riderInfo.region",
+          district: "$riderInfo.district",
+          deliveries: 1,
+          status: "$riderInfo.status",
+          workStatus: "$riderInfo.workStatus"
+        }
+      },
+      { $sort: { deliveries: -1 } }
+    ];
+
+    const result = await parcelsCollection.aggregate(pipeline).toArray();
+    res.send(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to fetch rider performance" });
+  }
+});
+
+
 
     await client.db("admin").command({ ping: 1 });
     console.log(
