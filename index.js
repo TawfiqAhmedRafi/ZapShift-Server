@@ -5,6 +5,8 @@ const app = express();
 const stripe = require("stripe")(process.env.STRIPE_SECRET);
 const crypto = require("crypto");
 const admin = require("firebase-admin");
+const nodemailer = require("nodemailer");
+const bcrypt = require("bcrypt");
 
 const serviceAccount = require("./zapshift-firebase-adminsdk.json");
 
@@ -100,6 +102,74 @@ async function run() {
       );
     };
 
+    // forget password related  api
+    app.post("/auth/forgot-password", async (req, res) => {
+      const { email } = req.body;
+      const user = await userCollection.findOne({ email });
+      
+      if (!user) return res.status(404).send({ message: "User not found" });
+
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+      const hashedOtp = await bcrypt.hash(otp, 10);
+
+      await userCollection.updateOne(
+        { email },
+        { $set: { resetOtp: hashedOtp, otpExpiry: Date.now() + 5 * 60 * 1000 } }
+      );
+      
+      const transporter = nodemailer.createTransport({
+        service: "Gmail",
+        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+      });
+
+      await transporter.sendMail({
+        from: process.env.EMAIL_USER,
+        to: email,
+        subject: "Your OTP Code",
+        text: `Your password reset code is ${otp}. It expires in 5 minutes.`,
+      });
+
+      res.send({ message: "OTP sent to email" });
+    });
+
+    // POST /auth/verify-otp
+    app.post("/auth/verify-otp", async (req, res) => {
+      const { email, otp } = req.body;
+      const user = await userCollection.findOne({ email });
+      if (!user) return res.status(404).send({ message: "User not found" });
+
+      if (!user.resetOtp || !user.otpExpiry || Date.now() > user.otpExpiry)
+        return res.status(400).send({ message: "OTP expired or invalid" });
+
+      const isValid = await bcrypt.compare(otp, user.resetOtp);
+      if (!isValid) return res.status(400).send({ message: "Incorrect OTP" });
+
+      res.send({ message: "OTP verified" });
+    });
+
+    // POST /auth/reset-password
+    app.post("/auth/reset-password", async (req, res) => {
+      const { email, otp, newPassword } = req.body;
+      const user = await userCollection.findOne({ email });
+      if (!user) return res.status(404).send({ message: "User not found" });
+
+      const isValid = await bcrypt.compare(otp, user.resetOtp);
+      if (!isValid || Date.now() > user.otpExpiry)
+        return res.status(400).send({ message: "Invalid or expired OTP" });
+
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      await userCollection.updateOne(
+        { email },
+        {
+          $set: { password: hashedPassword },
+          $unset: { resetOtp: "", otpExpiry: "" },
+        }
+      );
+
+      res.send({ message: "Password reset successful" });
+    });
+
     // tracking api
     app.get("/trackings/:trackingId/logs", async (req, res) => {
       const trackingId = req.params.trackingId;
@@ -108,114 +178,145 @@ async function run() {
       res.send(result);
     });
 
-    // user dashboard 
+    // user dashboard
 
- app.get("/user/dashboard/summary", verifyFBToken, async (req, res) => {
-  try {
-    const email = req.query.email || req.decoded_email;
+    app.get("/user/dashboard/summary", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.query.email || req.decoded_email;
 
-    
-    const parcels = await parcelsCollection
-      .find({ senderEmail: email })
-      .toArray();
+        const parcels = await parcelsCollection
+          .find({ senderEmail: email })
+          .toArray();
 
-    const totalParcels = parcels.length;
-    const delivered = parcels.filter(p => p.deliveryStatus === "parcel-delivered").length;
+        const totalParcels = parcels.length;
+        const delivered = parcels.filter(
+          (p) => p.deliveryStatus === "parcel-delivered"
+        ).length;
 
-    const inTransit = parcels.filter(p =>
-      ["parcel-picked-up", "driver-assigned", "rider-arriving"].includes(p.deliveryStatus)
-    ).length;
+        const inTransit = parcels.filter((p) =>
+          ["parcel-picked-up", "driver-assigned", "rider-arriving"].includes(
+            p.deliveryStatus
+          )
+        ).length;
 
-    
-    const pending = parcels.filter(p =>
-      !["parcel-delivered", "parcel-picked-up", "driver-assigned", "rider-arriving"].includes(p.deliveryStatus)
-    ).length;
+        const pending = parcels.filter(
+          (p) =>
+            ![
+              "parcel-delivered",
+              "parcel-picked-up",
+              "driver-assigned",
+              "rider-arriving",
+            ].includes(p.deliveryStatus)
+        ).length;
 
-    const active = parcels.filter(p => p.deliveryStatus !== "parcel-delivered").length;
+        const active = parcels.filter(
+          (p) => p.deliveryStatus !== "parcel-delivered"
+        ).length;
 
-    const totalSpend = parcels.reduce((sum, p) => sum + (p.cost || 0), 0);
+        const totalSpend = parcels.reduce((sum, p) => sum + (p.cost || 0), 0);
 
-    res.send({
-      totalParcels,
-      delivered,
-      inTransit,
-      pending,
-      active,
-      totalSpend
+        res.send({
+          totalParcels,
+          delivered,
+          inTransit,
+          pending,
+          active,
+          totalSpend,
+        });
+      } catch (err) {
+        console.error("GET /user/dashboard/summary error:", err);
+        res
+          .status(500)
+          .send({ message: "Failed to fetch user dashboard summary" });
+      }
     });
-  } catch (err) {
-    console.error("GET /user/dashboard/summary error:", err);
-    res.status(500).send({ message: "Failed to fetch user dashboard summary" });
-  }
-});   
 
-    
-app.get("/user/dashboard/performance", verifyFBToken, async (req, res) => {
-  try {
-    const email = req.query.email || req.decoded_email;
-    const month = req.query.month; // format "YYYY-MM"
+    app.get("/user/dashboard/performance", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.query.email || req.decoded_email;
+        const month = req.query.month; // format "YYYY-MM"
 
-    const matchStage = { senderEmail: email };
-    if (month) {
-      const [year, mon] = month.split("-");
-      const start = new Date(year, mon - 1, 1);
-      const end = new Date(year, mon, 1);
-      matchStage["deliveryLogs.createdAt"] = { $gte: start, $lt: end };
-    }
+        const matchStage = { senderEmail: email };
+        if (month) {
+          const [year, mon] = month.split("-");
+          const start = new Date(year, mon - 1, 1);
+          const end = new Date(year, mon, 1);
+          matchStage["deliveryLogs.createdAt"] = { $gte: start, $lt: end };
+        }
 
-    const pipeline = [
-      { $match: { senderEmail: email } },
-      {
-        $lookup: {
-          from: "trackings",
-          let: { tid: "$trackingId" },
-          pipeline: [
-            { 
-              $match: { 
-                $expr: { $and: [ { $eq: ["$trackingId", "$$tid"] }, { $eq: ["$status", "parcel-delivered"] } ] } 
-              } 
+        const pipeline = [
+          { $match: { senderEmail: email } },
+          {
+            $lookup: {
+              from: "trackings",
+              let: { tid: "$trackingId" },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ["$trackingId", "$$tid"] },
+                        { $eq: ["$status", "parcel-delivered"] },
+                      ],
+                    },
+                  },
+                },
+                { $project: { createdAt: 1, status: 1, _id: 0 } },
+              ],
+              as: "deliveryLogs",
             },
-            { $project: { createdAt: 1, status: 1, _id: 0 } }
-          ],
-          as: "deliveryLogs"
-        }
-      },
-      { $unwind: "$deliveryLogs" },
-      { $match: month ? { "deliveryLogs.createdAt": { $gte: new Date(`${month}-01`), $lt: new Date(`${month}-31`) } } : {} },
-      {
-        $group: {
-          _id: { $dateToString: { format: "%Y-%m-%d", date: "$deliveryLogs.createdAt" } },
-          delivered: { $sum: 1 }
-        }
-      },
-      { $sort: { _id: 1 } },
-      { $project: { date: "$_id", delivered: 1, _id: 0 } }
-    ];
+          },
+          { $unwind: "$deliveryLogs" },
+          {
+            $match: month
+              ? {
+                  "deliveryLogs.createdAt": {
+                    $gte: new Date(`${month}-01`),
+                    $lt: new Date(`${month}-31`),
+                  },
+                }
+              : {},
+          },
+          {
+            $group: {
+              _id: {
+                $dateToString: {
+                  format: "%Y-%m-%d",
+                  date: "$deliveryLogs.createdAt",
+                },
+              },
+              delivered: { $sum: 1 },
+            },
+          },
+          { $sort: { _id: 1 } },
+          { $project: { date: "$_id", delivered: 1, _id: 0 } },
+        ];
 
-    const dailyBarChart = await parcelsCollection.aggregate(pipeline).toArray();
+        const dailyBarChart = await parcelsCollection
+          .aggregate(pipeline)
+          .toArray();
 
-    // status counts remain same
-    const statusPipeline = [
-      { $match: { senderEmail: email } },
-      { $group: { _id: "$deliveryStatus", count: { $sum: 1 } } },
-      { $project: { status: "$_id", count: 1, _id: 0 } }
-    ];
-    const statusCounts = await parcelsCollection.aggregate(statusPipeline).toArray();
+        // status counts remain same
+        const statusPipeline = [
+          { $match: { senderEmail: email } },
+          { $group: { _id: "$deliveryStatus", count: { $sum: 1 } } },
+          { $project: { status: "$_id", count: 1, _id: 0 } },
+        ];
+        const statusCounts = await parcelsCollection
+          .aggregate(statusPipeline)
+          .toArray();
 
-    res.send({
-      dailyBarChart,
-      statusCounts
+        res.send({
+          dailyBarChart,
+          statusCounts,
+        });
+      } catch (err) {
+        console.error("GET /user/dashboard/performance error:", err);
+        res
+          .status(500)
+          .send({ message: "Failed to fetch user performance data" });
+      }
     });
-
-  } catch (err) {
-    console.error("GET /user/dashboard/performance error:", err);
-    res.status(500).send({ message: "Failed to fetch user performance data" });
-  }
-});
-
-
-
-
 
     // user api
 
@@ -302,110 +403,136 @@ app.get("/user/dashboard/performance", verifyFBToken, async (req, res) => {
     });
 
     // rider dashboard  api
-   // Rider Dashboard Stats
-app.get("/rider/dashboard/stats", verifyFBToken, verifyRider, async (req, res) => {
-  try {
-    const email = req.query.email || req.decoded_email;
-
-    const rider = await ridersCollection.findOne({ Email: email  });
-    if (!rider)
-      return res.status(404).send({ message: "Rider not found" });
-
-    const riderId = rider._id.toString();
-
-    const totalDeliveries = await parcelsCollection.countDocuments({ riderId });
-    const delivered = await parcelsCollection.countDocuments({
-      riderId,
-      deliveryStatus: "parcel-delivered",
-    });
-    const pending = await parcelsCollection.countDocuments({
-      riderId,
-      deliveryStatus: { $nin: ["parcel-delivered"] },
-    });
-
-    res.send({
-      riderName: rider.name,
-      totalDeliveries,
-      delivered,
-      pending,
-      workStatus: rider.workStatus,
-      status: rider.status,
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: "Failed to fetch rider stats" });
-  }
-});
 
 
+    // Rider Dashboard Stats
+    app.get("/rider/dashboard/stats",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.query.email || req.decoded_email;
 
-// Rider Dashboard Completed Parcels
-app.get("/rider/dashboard/completed", verifyFBToken, verifyRider, async (req, res) => {
-  try {
-    const email = req.query.email || req.decoded_email;
+          const rider = await ridersCollection.findOne({ Email: email });
+          if (!rider)
+            return res.status(404).send({ message: "Rider not found" });
 
-    const rider = await ridersCollection.findOne({ Email: email  });
-    if (!rider)
-      return res.status(404).send({ message: "Rider not found" });
+          const riderId = rider._id.toString();
 
-    const riderId = rider._id.toString();
+          const totalDeliveries = await parcelsCollection.countDocuments({
+            riderId,
+          });
+          const delivered = await parcelsCollection.countDocuments({
+            riderId,
+            deliveryStatus: "parcel-delivered",
+          });
+          const pending = await parcelsCollection.countDocuments({
+            riderId,
+            deliveryStatus: { $nin: ["parcel-delivered"] },
+          });
 
-    const parcels = await parcelsCollection
-      .find({ riderId, deliveryStatus: "parcel-delivered" })
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    res.send(parcels);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: "Failed to fetch completed deliveries" });
-  }
-});
-
-
-// Rider Dashboard Performance
-app.get("/rider/dashboard/performance", verifyFBToken, verifyRider, async (req, res) => {
-  try {
-    const email = req.query.email || req.decoded_email;
-
-    const rider = await ridersCollection.findOne({ Email: email });
-    if (!rider) return res.status(404).send({ message: "Rider not found" });
-
-    const riderId = rider._id.toString();
-
-    const pipeline = [
-      { $match: { riderId } }, // all parcels for this rider
-      {
-        $lookup: {
-          from: "trackings",
-          let: { tid: "$trackingId" },
-          pipeline: [
-            { $match: { $expr: { $eq: ["$trackingId", "$$tid"] }, status: "parcel-delivered" } }
-          ],
-          as: "deliveryLog"
+          res.send({
+            riderName: rider.name,
+            totalDeliveries,
+            delivered,
+            pending,
+            workStatus: rider.workStatus,
+            status: rider.status,
+          });
+        } catch (err) {
+          console.error(err);
+          res.status(500).send({ message: "Failed to fetch rider stats" });
         }
-      },
-      { $unwind: "$deliveryLog" }, // only consider parcels that have delivery logs
-      {
-        $group: {
-          _id: { $dateToString: { format: "%Y-%m-%d", date: "$deliveryLog.createdAt" } },
-          delivered: { $sum: 1 }
+      }
+    );
+
+    // Rider Dashboard Completed Parcels
+    app.get("/rider/dashboard/completed",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.query.email || req.decoded_email;
+
+          const rider = await ridersCollection.findOne({ Email: email });
+          if (!rider)
+            return res.status(404).send({ message: "Rider not found" });
+
+          const riderId = rider._id.toString();
+
+          const parcels = await parcelsCollection
+            .find({ riderId, deliveryStatus: "parcel-delivered" })
+            .sort({ createdAt: -1 })
+            .toArray();
+
+          res.send(parcels);
+        } catch (err) {
+          console.error(err);
+          res
+            .status(500)
+            .send({ message: "Failed to fetch completed deliveries" });
         }
-      },
-      { $sort: { _id: 1 } },
-      { $project: { date: "$_id", delivered: 1, _id: 0 } }
-    ];
+      }
+    );
 
-    const performance = await parcelsCollection.aggregate(pipeline).toArray();
+    // Rider Dashboard Performance
+    app.get("/rider/dashboard/performance",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.query.email || req.decoded_email;
 
-    res.send(performance);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: "Failed to fetch performance data" });
-  }
-});
+          const rider = await ridersCollection.findOne({ Email: email });
+          if (!rider)
+            return res.status(404).send({ message: "Rider not found" });
 
+          const riderId = rider._id.toString();
 
+          const pipeline = [
+            { $match: { riderId } }, // all parcels for this rider
+            {
+              $lookup: {
+                from: "trackings",
+                let: { tid: "$trackingId" },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: { $eq: ["$trackingId", "$$tid"] },
+                      status: "parcel-delivered",
+                    },
+                  },
+                ],
+                as: "deliveryLog",
+              },
+            },
+            { $unwind: "$deliveryLog" }, // only consider parcels that have delivery logs
+            {
+              $group: {
+                _id: {
+                  $dateToString: {
+                    format: "%Y-%m-%d",
+                    date: "$deliveryLog.createdAt",
+                  },
+                },
+                delivered: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+            { $project: { date: "$_id", delivered: 1, _id: 0 } },
+          ];
+
+          const performance = await parcelsCollection
+            .aggregate(pipeline)
+            .toArray();
+
+          res.send(performance);
+        } catch (err) {
+          console.error(err);
+          res.status(500).send({ message: "Failed to fetch performance data" });
+        }
+      }
+    );
 
     // rider api
     app.post("/riders", verifyFBToken, async (req, res) => {
@@ -472,39 +599,54 @@ app.get("/rider/dashboard/performance", verifyFBToken, verifyRider, async (req, 
       }
     });
 
-    app.patch("/riders/work-status", verifyFBToken, verifyRider, async (req, res) => {
-  try {
-    const { email, newWorkStatus } = req.body;
+    app.patch("/riders/work-status",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const { email, newWorkStatus } = req.body;
 
-    if (!email || !newWorkStatus) {
-      return res.status(400).send({ message: "Email and newWorkStatus are required" });
-    }
+          if (!email || !newWorkStatus) {
+            return res
+              .status(400)
+              .send({ message: "Email and newWorkStatus are required" });
+          }
 
-    // Find the rider
-    const rider = await ridersCollection.findOne({ Email: email });
-    if (!rider) {
-      return res.status(404).send({ message: "Rider not found" });
-    }
+          // Find the rider
+          const rider = await ridersCollection.findOne({ Email: email });
+          if (!rider) {
+            return res.status(404).send({ message: "Rider not found" });
+          }
 
-    // Prevent manual change if rider is currently in delivery
-    if (rider.workStatus === "in_delivery") {
-      return res.status(403).send({
-        message: "Cannot change work status while in delivery"
-      });
-    }
+          // Prevent manual change if rider is currently in delivery
+          if (rider.workStatus === "in_delivery") {
+            return res.status(403).send({
+              message: "Cannot change work status while in delivery",
+            });
+          }
 
-    // Update the workStatus
-    const updated = await ridersCollection.updateOne(
-      { Email: email },
-      { $set: { workStatus: newWorkStatus } }
+          // Update the workStatus
+          const updated = await ridersCollection.updateOne(
+            { Email: email },
+            { $set: { workStatus: newWorkStatus } }
+          );
+
+          res.send({
+            success: true,
+            updatedCount: updated.modifiedCount,
+            newWorkStatus,
+          });
+        } catch (err) {
+          console.error(err);
+          res
+            .status(500)
+            .send({
+              message: "Failed to update work status",
+              error: err.message,
+            });
+        }
+      }
     );
-
-    res.send({ success: true, updatedCount: updated.modifiedCount, newWorkStatus });
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: "Failed to update work status", error: err.message });
-  }
-});
 
     app.patch("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
       const status = req.body.status;
@@ -963,7 +1105,7 @@ app.get("/rider/dashboard/performance", verifyFBToken, verifyRider, async (req, 
       verifyAdmin,
       async (req, res) => {
         try {
-          const { period = "monthly" } = req.query; // default monthly
+          const { period = "monthly" } = req.query;
 
           let groupId;
           if (period === "weekly") {
