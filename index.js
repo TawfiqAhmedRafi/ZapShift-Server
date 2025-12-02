@@ -8,7 +8,8 @@ const admin = require("firebase-admin");
 const nodemailer = require("nodemailer");
 const bcrypt = require("bcrypt");
 
-const serviceAccount = require("./zapshift-firebase-adminsdk.json");
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
+const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -1194,10 +1195,10 @@ async function run() {
       }
     );
 
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
   } finally {
   }
 }
@@ -1207,6 +1208,7 @@ app.get("/", (req, res) => {
   res.send("Zap is shifting shifting");
 });
 
-app.listen(port, () => {
-  console.log(`Zapshift app listening on port ${port}`);
-});
+// app.listen(port, () => {
+//   console.log(`Zapshift app listening on port ${port}`);
+// });
+module.exports = app;
