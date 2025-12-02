@@ -109,8 +109,8 @@ async function run() {
     });
 
     // user dashboard 
-    
-app.get("/user/dashboard/summary", verifyFBToken, async (req, res) => {
+
+ app.get("/user/dashboard/summary", verifyFBToken, async (req, res) => {
   try {
     const email = req.query.email || req.decoded_email;
 
@@ -147,29 +147,41 @@ app.get("/user/dashboard/summary", verifyFBToken, async (req, res) => {
     console.error("GET /user/dashboard/summary error:", err);
     res.status(500).send({ message: "Failed to fetch user dashboard summary" });
   }
-});
+});   
 
-
+    
 app.get("/user/dashboard/performance", verifyFBToken, async (req, res) => {
   try {
     const email = req.query.email || req.decoded_email;
+    const month = req.query.month; // format "YYYY-MM"
 
-    
+    const matchStage = { senderEmail: email };
+    if (month) {
+      const [year, mon] = month.split("-");
+      const start = new Date(year, mon - 1, 1);
+      const end = new Date(year, mon, 1);
+      matchStage["deliveryLogs.createdAt"] = { $gte: start, $lt: end };
+    }
+
     const pipeline = [
-      { $match: { senderEmail: email } }, 
+      { $match: { senderEmail: email } },
       {
         $lookup: {
           from: "trackings",
           let: { tid: "$trackingId" },
           pipeline: [
-            { $match: { $expr: { $and: [ { $eq: ["$trackingId", "$$tid"] }, { $eq: ["$status", "parcel-delivered"] } ] } } },
-          
+            { 
+              $match: { 
+                $expr: { $and: [ { $eq: ["$trackingId", "$$tid"] }, { $eq: ["$status", "parcel-delivered"] } ] } 
+              } 
+            },
             { $project: { createdAt: 1, status: 1, _id: 0 } }
           ],
           as: "deliveryLogs"
         }
       },
-      { $unwind: "$deliveryLogs" }, 
+      { $unwind: "$deliveryLogs" },
+      { $match: month ? { "deliveryLogs.createdAt": { $gte: new Date(`${month}-01`), $lt: new Date(`${month}-31`) } } : {} },
       {
         $group: {
           _id: { $dateToString: { format: "%Y-%m-%d", date: "$deliveryLogs.createdAt" } },
@@ -180,9 +192,9 @@ app.get("/user/dashboard/performance", verifyFBToken, async (req, res) => {
       { $project: { date: "$_id", delivered: 1, _id: 0 } }
     ];
 
-    const barChart = await parcelsCollection.aggregate(pipeline).toArray();
+    const dailyBarChart = await parcelsCollection.aggregate(pipeline).toArray();
 
-  
+    // status counts remain same
     const statusPipeline = [
       { $match: { senderEmail: email } },
       { $group: { _id: "$deliveryStatus", count: { $sum: 1 } } },
@@ -191,14 +203,18 @@ app.get("/user/dashboard/performance", verifyFBToken, async (req, res) => {
     const statusCounts = await parcelsCollection.aggregate(statusPipeline).toArray();
 
     res.send({
-      barChart,      
-      statusCounts   
+      dailyBarChart,
+      statusCounts
     });
+
   } catch (err) {
     console.error("GET /user/dashboard/performance error:", err);
     res.status(500).send({ message: "Failed to fetch user performance data" });
   }
 });
+
+
+
 
 
     // user api
