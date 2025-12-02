@@ -6,7 +6,6 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET);
 const crypto = require("crypto");
 const admin = require("firebase-admin");
 
-
 const serviceAccount = require("./zapshift-firebase-adminsdk.json");
 
 admin.initializeApp({
@@ -106,7 +105,7 @@ async function run() {
       const trackingId = req.params.trackingId;
       const query = { trackingId };
       const result = await trackingsCollection.find(query).toArray();
-      res.send(result)
+      res.send(result);
     });
 
     // user api
@@ -192,6 +191,100 @@ async function run() {
       res.send(result);
     });
 
+    // rider dashboard  api
+   // Rider Dashboard Stats
+app.get("/rider/dashboard/stats", verifyFBToken, verifyRider, async (req, res) => {
+  try {
+    const email = req.query.email || req.decoded_email;
+
+    const rider = await ridersCollection.findOne({ Email: email  });
+    if (!rider)
+      return res.status(404).send({ message: "Rider not found" });
+
+    const riderId = rider._id.toString();
+
+    const totalDeliveries = await parcelsCollection.countDocuments({ riderId });
+    const delivered = await parcelsCollection.countDocuments({
+      riderId,
+      deliveryStatus: "parcel-delivered",
+    });
+    const pending = await parcelsCollection.countDocuments({
+      riderId,
+      deliveryStatus: { $nin: ["parcel-delivered"] },
+    });
+
+    res.send({
+      riderName: rider.name,
+      totalDeliveries,
+      delivered,
+      pending,
+      workStatus: rider.workStatus,
+      status: rider.status,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to fetch rider stats" });
+  }
+});
+
+
+
+// Rider Dashboard Completed Parcels
+app.get("/rider/dashboard/completed", verifyFBToken, verifyRider, async (req, res) => {
+  try {
+    const email = req.query.email || req.decoded_email;
+
+    const rider = await ridersCollection.findOne({ Email: email  });
+    if (!rider)
+      return res.status(404).send({ message: "Rider not found" });
+
+    const riderId = rider._id.toString();
+
+    const parcels = await parcelsCollection
+      .find({ riderId, deliveryStatus: "parcel-delivered" })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(parcels);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to fetch completed deliveries" });
+  }
+});
+
+// Rider Dashboard Performance
+app.get("/rider/dashboard/performance", verifyFBToken, verifyRider, async (req, res) => {
+  try {
+    const email = req.query.email || req.decoded_email;
+
+    const rider = await ridersCollection.findOne({ Email: email  });
+    if (!rider)
+      return res.status(404).send({ message: "Rider not found" });
+
+    const riderId = rider._id.toString();
+
+    const pipeline = [
+      { $match: { riderId, deliveryStatus: "parcel-delivered" } },
+      {
+        $group: {
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+          delivered: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+      { $project: { date: "$_id", delivered: 1, _id: 0 } },
+    ];
+
+    const performance = await parcelsCollection.aggregate(pipeline).toArray();
+
+    res.send(performance);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to fetch performance data" });
+  }
+});
+
+
     // rider api
     app.post("/riders", verifyFBToken, async (req, res) => {
       const rider = req.body;
@@ -256,6 +349,40 @@ async function run() {
         res.status(500).send({ message: "Error fetching rider", error });
       }
     });
+
+    app.patch("/riders/work-status", verifyFBToken, verifyRider, async (req, res) => {
+  try {
+    const { email, newWorkStatus } = req.body;
+
+    if (!email || !newWorkStatus) {
+      return res.status(400).send({ message: "Email and newWorkStatus are required" });
+    }
+
+    // Find the rider
+    const rider = await ridersCollection.findOne({ Email: email });
+    if (!rider) {
+      return res.status(404).send({ message: "Rider not found" });
+    }
+
+    // Prevent manual change if rider is currently in delivery
+    if (rider.workStatus === "in_delivery") {
+      return res.status(403).send({
+        message: "Cannot change work status while in delivery"
+      });
+    }
+
+    // Update the workStatus
+    const updated = await ridersCollection.updateOne(
+      { Email: email },
+      { $set: { workStatus: newWorkStatus } }
+    );
+
+    res.send({ success: true, updatedCount: updated.modifiedCount, newWorkStatus });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to update work status", error: err.message });
+  }
+});
 
     app.patch("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
       const status = req.body.status;
@@ -346,7 +473,7 @@ async function run() {
         data: result,
       });
     });
-    app.get("/parcels/rider",verifyFBToken, verifyRider, async (req, res) => {
+    app.get("/parcels/rider", verifyFBToken, verifyRider, async (req, res) => {
       const { riderEmail, deliveryStatus } = req.query;
       const query = {};
 
@@ -375,72 +502,76 @@ async function run() {
       res.send(result);
     });
 
+    app.patch(
+      "/parcels/:id/status",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const { deliveryStatus, workStatus, trackingId } = req.body;
+          const parcelId = req.params.id;
 
-    app.patch("/parcels/:id/status",verifyFBToken, verifyRider, async (req, res) => {
-      try {
-        const { deliveryStatus, workStatus, trackingId } = req.body;
-        const parcelId = req.params.id;
+          //  Find the parcel
+          const parcel = await parcelsCollection.findOne({
+            _id: new ObjectId(parcelId),
+          });
+          if (!parcel)
+            return res.status(404).send({ message: "Parcel not found" });
 
-        //  Find the parcel
-        const parcel = await parcelsCollection.findOne({
-          _id: new ObjectId(parcelId),
-        });
-        if (!parcel)
-          return res.status(404).send({ message: "Parcel not found" });
+          let riderId = parcel.riderId;
 
-        let riderId = parcel.riderId;
+          //  Handle rejection
+          let clearRider = {};
+          if (deliveryStatus === "parcel-paid" && riderId) {
+            await ridersCollection.updateOne(
+              { _id: new ObjectId(riderId) },
+              { $set: { workStatus: "available" } }
+            );
 
-        //  Handle rejection
-        let clearRider = {};
-        if (deliveryStatus === "parcel-paid" && riderId) {
-          await ridersCollection.updateOne(
-            { _id: new ObjectId(riderId) },
-            { $set: { workStatus: "available" } }
-          );
+            riderId = ""; // clear local variable
+            clearRider = {
+              riderId: "",
+              riderEmail: "",
+              riderName: "",
+              riderPhone: "",
+            };
+          }
 
-          riderId = ""; // clear local variable
-          clearRider = {
-            riderId: "",
-            riderEmail: "",
-            riderName: "",
-            riderPhone: "",
+          //  Update rider workStatus for normal flow
+          if (deliveryStatus !== "parcel-paid" && riderId) {
+            await ridersCollection.updateOne(
+              { _id: new ObjectId(riderId) },
+              { $set: { workStatus } }
+            );
+          }
+
+          //  Update parcel
+          const updatedParcel = {
+            $set: {
+              deliveryStatus,
+              ...clearRider,
+            },
           };
-        }
 
-        //  Update rider workStatus for normal flow
-        if (deliveryStatus !== "parcel-paid" && riderId) {
-          await ridersCollection.updateOne(
-            { _id: new ObjectId(riderId) },
-            { $set: { workStatus } }
+          const result = await parcelsCollection.updateOne(
+            { _id: new ObjectId(parcelId) },
+            updatedParcel
           );
+          logTracking(trackingId, deliveryStatus);
+          res.send(result);
+        } catch (err) {
+          console.error(err);
+          res.status(500).send({ message: "Internal server error" });
         }
-
-        //  Update parcel
-        const updatedParcel = {
-          $set: {
-            deliveryStatus,
-            ...clearRider,
-          },
-        };
-
-        const result = await parcelsCollection.updateOne(
-          { _id: new ObjectId(parcelId) },
-          updatedParcel
-        );
-        logTracking(trackingId, deliveryStatus);
-        res.send(result);
-      } catch (err) {
-        console.error(err);
-        res.status(500).send({ message: "Internal server error" });
       }
-    });
+    );
 
     app.post("/parcels", async (req, res) => {
       const parcel = req.body;
       const trackingId = generateTrackingId();
       parcel.createdAt = new Date();
-      parcel.trackingId=trackingId
-      logTracking(trackingId,'parcel-created')
+      parcel.trackingId = trackingId;
+      logTracking(trackingId, "parcel-created");
       const result = await parcelsCollection.insertOne(parcel);
       res.send(result);
     });
@@ -505,7 +636,7 @@ async function run() {
         metadata: {
           parcelId: paymentInfo.parcelId,
           parcelName: paymentInfo.parcelName,
-          trackingId : paymentInfo.trackingId
+          trackingId: paymentInfo.trackingId,
         },
         customer_email: paymentInfo.senderEmail,
         success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
@@ -547,12 +678,11 @@ async function run() {
         }
 
         // trackingId created created during parcel creation
-        const trackingId = session.metadata.trackingId//
+        const trackingId = session.metadata.trackingId; //
         await parcelsCollection.updateOne(
           { _id: parcel._id },
           {
             $set: {
-              
               paymentStatus: "paid",
               deliveryStatus: "parcel-paid",
             },
@@ -643,138 +773,162 @@ async function run() {
 
     // dashboard API
 
+    app.get(
+      "/dashboard/stats",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const totalParcels = await parcelsCollection.countDocuments();
+          const deliveredParcels = await parcelsCollection.countDocuments({
+            deliveryStatus: "parcel-delivered",
+          });
+          const pendingParcels = await parcelsCollection.countDocuments({
+            deliveryStatus: { $nin: ["parcel-delivered"] },
+          });
 
-app.get("/dashboard/stats", verifyFBToken, verifyAdmin, async (req, res) => {
-  try {
-    const totalParcels = await parcelsCollection.countDocuments();
-    const deliveredParcels = await parcelsCollection.countDocuments({ deliveryStatus: "parcel-delivered" });
-    const pendingParcels = await parcelsCollection.countDocuments({ deliveryStatus: { $nin: ["parcel-delivered"] } });
+          const totalRevenueAgg = await paymentCollection
+            .aggregate([
+              { $match: { amount: { $exists: true, $type: "number" } } },
+              { $group: { _id: null, total: { $sum: "$amount" } } },
+            ])
+            .toArray();
+          const totalRevenue = totalRevenueAgg[0]?.total || 0;
 
-    const totalRevenueAgg = await paymentCollection.aggregate([
-      { $match: { amount: { $exists: true, $type: "number" } } },
-      { $group: { _id: null, total: { $sum: "$amount" } } }
-    ]).toArray();
-    const totalRevenue = totalRevenueAgg[0]?.total || 0;
+          const totalUsers = await userCollection.countDocuments();
+          const totalRiders = await ridersCollection.countDocuments();
 
-    const totalUsers = await userCollection.countDocuments();
-    const totalRiders = await ridersCollection.countDocuments();
-
-    res.send({
-      totalParcels,
-      deliveredParcels,
-      pendingParcels,
-      totalRevenue,
-      totalUsers,
-      totalRiders
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: "Failed to fetch dashboard stats" });
-  }
-});
-
-app.get("/dashboard/delivery-status", verifyFBToken, verifyAdmin, async (req, res) => {
-  try {
-    const pipeline = [
-      { $match: { deliveryStatus: { $exists: true, $ne: null } } },
-      { $group: { _id: "$deliveryStatus", count: { $sum: 1 } } },
-      { $project: { status: "$_id", count: 1, _id: 0 } }
-    ];
-    const result = await parcelsCollection.aggregate(pipeline).toArray();
-    res.send(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: "Failed to fetch delivery status data" });
-  }
-});
-
-app.get("/dashboard/revenue", verifyFBToken, verifyAdmin, async (req, res) => {
-  try {
-    const { period = "monthly" } = req.query; // default monthly
-
-    let groupId;
-    if (period === "weekly") {
-      
-      groupId = {
-        $dateToString: { format: "%Y-%U", date: "$paidAt" } // 
-      };
-    } else {
-      
-      groupId = {
-        $dateToString: { format: "%Y-%m", date: "$paidAt" }
-      };
-    }
-
-    const pipeline = [
-      { $match: { paidAt: { $exists: true, $type: "date" } } },
-      {
-        $group: {
-          _id: groupId,
-          totalRevenue: { $sum: "$amount" }
+          res.send({
+            totalParcels,
+            deliveredParcels,
+            pendingParcels,
+            totalRevenue,
+            totalUsers,
+            totalRiders,
+          });
+        } catch (err) {
+          console.error(err);
+          res.status(500).send({ message: "Failed to fetch dashboard stats" });
         }
-      },
-      { $sort: { "_id": 1 } },
-      { $project: { period: "$_id", totalRevenue: 1, _id: 0 } }
-    ];
+      }
+    );
 
-    const result = await paymentCollection.aggregate(pipeline).toArray();
-    res.send(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: "Failed to fetch revenue" });
-  }
-});
-
-
-app.get("/dashboard/rider-performance", verifyFBToken, verifyAdmin, async (req, res) => {
-  try {
-    const pipeline = [
-      { $match: { riderId: { $exists: true, $ne: "" } } },
-      {
-        $group: {
-          _id: "$riderId",
-          deliveries: { $sum: 1 }
+    app.get(
+      "/dashboard/delivery-status",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const pipeline = [
+            { $match: { deliveryStatus: { $exists: true, $ne: null } } },
+            { $group: { _id: "$deliveryStatus", count: { $sum: 1 } } },
+            { $project: { status: "$_id", count: 1, _id: 0 } },
+          ];
+          const result = await parcelsCollection.aggregate(pipeline).toArray();
+          res.send(result);
+        } catch (err) {
+          console.error(err);
+          res
+            .status(500)
+            .send({ message: "Failed to fetch delivery status data" });
         }
-      },
-      {
-        $lookup: {
-          from: "riders",
-          let: { riderIdStr: "$_id" },
-          pipeline: [
+      }
+    );
+
+    app.get(
+      "/dashboard/revenue",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const { period = "monthly" } = req.query; // default monthly
+
+          let groupId;
+          if (period === "weekly") {
+            groupId = {
+              $dateToString: { format: "%Y-%U", date: "$paidAt" }, //
+            };
+          } else {
+            groupId = {
+              $dateToString: { format: "%Y-%m", date: "$paidAt" },
+            };
+          }
+
+          const pipeline = [
+            { $match: { paidAt: { $exists: true, $type: "date" } } },
             {
-              $match: {
-                $expr: { $eq: ["$_id", { $toObjectId: "$$riderIdStr" }] }
-              }
-            }
-          ],
-          as: "riderInfo"
+              $group: {
+                _id: groupId,
+                totalRevenue: { $sum: "$amount" },
+              },
+            },
+            { $sort: { _id: 1 } },
+            { $project: { period: "$_id", totalRevenue: 1, _id: 0 } },
+          ];
+
+          const result = await paymentCollection.aggregate(pipeline).toArray();
+          res.send(result);
+        } catch (err) {
+          console.error(err);
+          res.status(500).send({ message: "Failed to fetch revenue" });
         }
-      },
-      { $unwind: "$riderInfo" },
-      {
-        $project: {
-          _id: 0,
-          riderId: "$_id",
-          riderName: "$riderInfo.name",
-          region: "$riderInfo.region",
-          district: "$riderInfo.district",
-          deliveries: 1,
-          status: "$riderInfo.status",
-          workStatus: "$riderInfo.workStatus"
+      }
+    );
+
+    app.get(
+      "/dashboard/rider-performance",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const pipeline = [
+            { $match: { riderId: { $exists: true, $ne: "" } } },
+            {
+              $group: {
+                _id: "$riderId",
+                deliveries: { $sum: 1 },
+              },
+            },
+            {
+              $lookup: {
+                from: "riders",
+                let: { riderIdStr: "$_id" },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: { $eq: ["$_id", { $toObjectId: "$$riderIdStr" }] },
+                    },
+                  },
+                ],
+                as: "riderInfo",
+              },
+            },
+            { $unwind: "$riderInfo" },
+            {
+              $project: {
+                _id: 0,
+                riderId: "$_id",
+                riderName: "$riderInfo.name",
+                region: "$riderInfo.region",
+                district: "$riderInfo.district",
+                deliveries: 1,
+                status: "$riderInfo.status",
+                workStatus: "$riderInfo.workStatus",
+              },
+            },
+            { $sort: { deliveries: -1 } },
+          ];
+
+          const result = await parcelsCollection.aggregate(pipeline).toArray();
+          res.send(result);
+        } catch (err) {
+          console.error(err);
+          res
+            .status(500)
+            .send({ message: "Failed to fetch rider performance" });
         }
-      },
-      { $sort: { deliveries: -1 } }
-    ];
-
-    const result = await parcelsCollection.aggregate(pipeline).toArray();
-    res.send(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: "Failed to fetch rider performance" });
-  }
-});
-
-
+      }
+    );
 
     await client.db("admin").command({ ping: 1 });
     console.log(
