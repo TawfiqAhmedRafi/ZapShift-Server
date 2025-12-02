@@ -108,7 +108,101 @@ async function run() {
       res.send(result);
     });
 
+    // user dashboard 
+    
+app.get("/user/dashboard/summary", verifyFBToken, async (req, res) => {
+  try {
+    const email = req.query.email || req.decoded_email;
+
+    
+    const parcels = await parcelsCollection
+      .find({ senderEmail: email })
+      .toArray();
+
+    const totalParcels = parcels.length;
+    const delivered = parcels.filter(p => p.deliveryStatus === "parcel-delivered").length;
+
+    const inTransit = parcels.filter(p =>
+      ["parcel-picked-up", "driver-assigned", "rider-arriving"].includes(p.deliveryStatus)
+    ).length;
+
+    
+    const pending = parcels.filter(p =>
+      !["parcel-delivered", "parcel-picked-up", "driver-assigned", "rider-arriving"].includes(p.deliveryStatus)
+    ).length;
+
+    const active = parcels.filter(p => p.deliveryStatus !== "parcel-delivered").length;
+
+    const totalSpend = parcels.reduce((sum, p) => sum + (p.cost || 0), 0);
+
+    res.send({
+      totalParcels,
+      delivered,
+      inTransit,
+      pending,
+      active,
+      totalSpend
+    });
+  } catch (err) {
+    console.error("GET /user/dashboard/summary error:", err);
+    res.status(500).send({ message: "Failed to fetch user dashboard summary" });
+  }
+});
+
+
+app.get("/user/dashboard/performance", verifyFBToken, async (req, res) => {
+  try {
+    const email = req.query.email || req.decoded_email;
+
+    
+    const pipeline = [
+      { $match: { senderEmail: email } }, 
+      {
+        $lookup: {
+          from: "trackings",
+          let: { tid: "$trackingId" },
+          pipeline: [
+            { $match: { $expr: { $and: [ { $eq: ["$trackingId", "$$tid"] }, { $eq: ["$status", "parcel-delivered"] } ] } } },
+          
+            { $project: { createdAt: 1, status: 1, _id: 0 } }
+          ],
+          as: "deliveryLogs"
+        }
+      },
+      { $unwind: "$deliveryLogs" }, 
+      {
+        $group: {
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$deliveryLogs.createdAt" } },
+          delivered: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } },
+      { $project: { date: "$_id", delivered: 1, _id: 0 } }
+    ];
+
+    const barChart = await parcelsCollection.aggregate(pipeline).toArray();
+
+  
+    const statusPipeline = [
+      { $match: { senderEmail: email } },
+      { $group: { _id: "$deliveryStatus", count: { $sum: 1 } } },
+      { $project: { status: "$_id", count: 1, _id: 0 } }
+    ];
+    const statusCounts = await parcelsCollection.aggregate(statusPipeline).toArray();
+
+    res.send({
+      barChart,      
+      statusCounts   
+    });
+  } catch (err) {
+    console.error("GET /user/dashboard/performance error:", err);
+    res.status(500).send({ message: "Failed to fetch user performance data" });
+  }
+});
+
+
     // user api
+
     app.get("/users", verifyFBToken, async (req, res) => {
       try {
         const { page = 1, limit = 10, search = "" } = req.query;
