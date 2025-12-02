@@ -252,27 +252,38 @@ app.get("/rider/dashboard/completed", verifyFBToken, verifyRider, async (req, re
   }
 });
 
+
 // Rider Dashboard Performance
 app.get("/rider/dashboard/performance", verifyFBToken, verifyRider, async (req, res) => {
   try {
     const email = req.query.email || req.decoded_email;
 
-    const rider = await ridersCollection.findOne({ Email: email  });
-    if (!rider)
-      return res.status(404).send({ message: "Rider not found" });
+    const rider = await ridersCollection.findOne({ Email: email });
+    if (!rider) return res.status(404).send({ message: "Rider not found" });
 
     const riderId = rider._id.toString();
 
     const pipeline = [
-      { $match: { riderId, deliveryStatus: "parcel-delivered" } },
+      { $match: { riderId } }, // all parcels for this rider
+      {
+        $lookup: {
+          from: "trackings",
+          let: { tid: "$trackingId" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$trackingId", "$$tid"] }, status: "parcel-delivered" } }
+          ],
+          as: "deliveryLog"
+        }
+      },
+      { $unwind: "$deliveryLog" }, // only consider parcels that have delivery logs
       {
         $group: {
-          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
-          delivered: { $sum: 1 },
-        },
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$deliveryLog.createdAt" } },
+          delivered: { $sum: 1 }
+        }
       },
       { $sort: { _id: 1 } },
-      { $project: { date: "$_id", delivered: 1, _id: 0 } },
+      { $project: { date: "$_id", delivered: 1, _id: 0 } }
     ];
 
     const performance = await parcelsCollection.aggregate(pipeline).toArray();
@@ -283,6 +294,7 @@ app.get("/rider/dashboard/performance", verifyFBToken, verifyRider, async (req, 
     res.status(500).send({ message: "Failed to fetch performance data" });
   }
 });
+
 
 
     // rider api
