@@ -8,7 +8,10 @@ const admin = require("firebase-admin");
 const nodemailer = require("nodemailer");
 const bcrypt = require("bcrypt");
 
-const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
+
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf8"
+);
 const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
@@ -65,6 +68,28 @@ async function run() {
     const paymentCollection = db.collection("payments");
     const ridersCollection = db.collection("riders");
     const trackingsCollection = db.collection("trackings");
+    // --- CREATE INDEXES ---
+
+    // Parcels
+    await parcelsCollection.createIndex({ senderEmail: 1 });
+    await parcelsCollection.createIndex({ deliveryStatus: 1 });
+    await parcelsCollection.createIndex({ riderId: 1 });
+    await parcelsCollection.createIndex({ createdAt: -1 }); // for sorting latest first
+    await parcelsCollection.createIndex({ trackingId: 1 });
+
+    // Trackings
+    await trackingsCollection.createIndex({ trackingId: 1 });
+    await trackingsCollection.createIndex({ status: 1 });
+
+    // Users
+    await userCollection.createIndex({ email: 1 });
+
+    // Riders
+    await ridersCollection.createIndex({ Email: 1 });
+
+    // Payments
+    await paymentCollection.createIndex({ customer_email: 1 });
+    await paymentCollection.createIndex({ paidAt: -1 }); // for sorting by date
 
     //middleWare with database access
     const verifyAdmin = async (req, res, next) => {
@@ -107,7 +132,7 @@ async function run() {
     app.post("/auth/forgot-password", async (req, res) => {
       const { email } = req.body;
       const user = await userCollection.findOne({ email });
-      
+
       if (!user) return res.status(404).send({ message: "User not found" });
 
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -118,7 +143,7 @@ async function run() {
         { email },
         { $set: { resetOtp: hashedOtp, otpExpiry: Date.now() + 5 * 60 * 1000 } }
       );
-      
+
       const transporter = nodemailer.createTransport({
         service: "Gmail",
         auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
@@ -405,9 +430,9 @@ async function run() {
 
     // rider dashboard  api
 
-
     // Rider Dashboard Stats
-    app.get("/rider/dashboard/stats",
+    app.get(
+      "/rider/dashboard/stats",
       verifyFBToken,
       verifyRider,
       async (req, res) => {
@@ -448,7 +473,8 @@ async function run() {
     );
 
     // Rider Dashboard Completed Parcels
-    app.get("/rider/dashboard/completed",
+    app.get(
+      "/rider/dashboard/completed",
       verifyFBToken,
       verifyRider,
       async (req, res) => {
@@ -477,7 +503,8 @@ async function run() {
     );
 
     // Rider Dashboard Performance
-    app.get("/rider/dashboard/performance",
+    app.get(
+      "/rider/dashboard/performance",
       verifyFBToken,
       verifyRider,
       async (req, res) => {
@@ -600,7 +627,8 @@ async function run() {
       }
     });
 
-    app.patch("/riders/work-status",
+    app.patch(
+      "/riders/work-status",
       verifyFBToken,
       verifyRider,
       async (req, res) => {
@@ -639,12 +667,10 @@ async function run() {
           });
         } catch (err) {
           console.error(err);
-          res
-            .status(500)
-            .send({
-              message: "Failed to update work status",
-              error: err.message,
-            });
+          res.status(500).send({
+            message: "Failed to update work status",
+            error: err.message,
+          });
         }
       }
     );
